@@ -1,0 +1,1585 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>レシピフォーム</title>
+
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script src="https://unpkg.com/html-to-image@1.11.11/dist/html-to-image.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100">
+  <div id="root"></div>
+
+  <script type="text/babel">
+const { useState, useEffect } = React;
+
+// lucide-react代替アイコン（CDN版でエラーを出さないため）
+const Icon = ({ size = 20, className = "" }) => (
+  <span className={className} style={{ fontSize: size, display: "inline-block", lineHeight: 1 }}>□</span>
+);
+const RefreshCw = Icon;
+const ImageIcon = Icon;
+const ChefHat = Icon;
+const CheckCircle = Icon;
+const Target = Icon;
+const BookOpen = Icon;
+const Send = Icon;
+const Download = Icon;
+const AlertCircle = Icon;
+const Save = Icon;
+const X = Icon;
+const Upload = Icon;
+const FileText = Icon;
+const Files = Icon;
+
+
+// --- グローバル定数 ---
+const COLORS = {
+  text: '#182349',
+  background: '#fffdf8',
+  accent: '#cb563e',
+  gradientBar: 'linear-gradient(90deg, #cb563e 0%, #fffdf8 50%, #182349 100%)',
+};
+const N = '#182349';
+const R = '#cb563e';
+const FONT = '"Helvetica Neue", Arial, "Hiragino Kaku Gothic ProN", "Hiragino Sans", Meiryo, sans-serif';
+const EXPORT_FONT = '"Zen Maru Gothic", "Tsukushi B Round Gothic", "筑紫B丸ゴシック", "Hiragino Maru Gothic ProN", "Helvetica Neue", Arial, sans-serif';
+const KOKUMI_LEVELS = ['さらっ軽い', '軽め', '中庸', '濃いめ', 'どっしり濃厚'];
+const SALT_LEVELS = ['無', '弱', '中', '強'];
+
+// ============================================================
+// MakeのWebhook URL
+// ============================================================
+const MAKE_WEBHOOK_URL = 'https://hook.eu2.make.com/YOUR_WEBHOOK_ID_HERE';
+
+// --- Firebase 初期化 ---
+let app, auth, db, appId;
+try {
+  const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+  if (firebaseConfig) {
+    app = initializeApp(firebaseConfig);
+    auth = getAuth(app);
+    db = getFirestore(app);
+    appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+  }
+} catch (e) {
+  console.warn("Firebase config not found or invalid", e);
+}
+
+// ============================================================
+// 共通ユーティリティ
+// ============================================================
+const sanitizeFileName = (name) => {
+  return String(name || '')
+    .replace(/[\\/:*?"<>|]/g, '＿')
+    .replace(/\s+/g, ' ')
+    .trim();
+};
+
+const isMobileDevice = () => {
+  return /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+};
+
+const savePdfWithPicker = async (pdf, filename, onMobilePdfReady) => {
+  const blob = pdf.output('blob');
+
+  // スマホの場合：Blobとfilenameをstateに渡す（Web Share API用）
+  if (isMobileDevice()) {
+    if (onMobilePdfReady) {
+      onMobilePdfReady({
+        filename,
+        blob,
+      });
+    }
+    return;
+  }
+
+  // PCの場合：保存先選択（showSaveFilePicker）が使えるなら優先
+  if (window.showSaveFilePicker) {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: filename,
+        types: [{
+          description: 'PDF file',
+          accept: { 'application/pdf': ['.pdf'] },
+        }],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return;
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;
+      console.warn('showSaveFilePicker failed, fallback to link download', e);
+    }
+  }
+
+  // PCフォールバック：アンカータグによるダウンロード
+  const blobUrl = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = blobUrl;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+};
+
+// ============================================================
+// 入力フォーム用コンポーネント
+// ============================================================
+const Badge = ({ children, className = "" }) => (
+  <div
+    className={`bg-[#182349] text-white font-bold px-2.5 rounded-[2px] inline-block text-center whitespace-nowrap tracking-wider ${className}`}
+    style={{ paddingTop: '0.4em', paddingBottom: '0.4em', lineHeight: 'normal' }}
+  >
+    <div style={{ transform: 'translateY(-0.12em)' }}>{children}</div>
+  </div>
+);
+
+const Card = ({ title, children }) => (
+  <div className="bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100 mb-8 transition-all hover:shadow-2xl">
+    <div className="h-2 w-full" style={{ background: COLORS.gradientBar }}></div>
+    <div className="p-4 sm:p-8">
+      <h3 className="text-xl font-black border-b-2 border-[#182349] pb-2 mb-6 text-[#182349] tracking-tighter">{title}</h3>
+      <div>{children}</div>
+    </div>
+  </div>
+);
+
+const Label = ({ children }) => <label className="block text-sm font-black text-[#182349] mb-1">{children}</label>;
+const SubLabel = ({ children }) => <p className="text-xs font-bold text-gray-500 mb-2 leading-relaxed">{children}</p>;
+
+const TextArea = ({ value, onChange, placeholder, rows = 3 }) => (
+  <textarea value={value} onChange={onChange} placeholder={placeholder} rows={rows}
+    className="w-full p-3 border border-gray-200 rounded-lg outline-none focus:border-[#cb563e] transition-all bg-white text-[#182349] text-sm" />
+);
+
+const Input = ({ value, onChange, placeholder, suffix = "", prefix = "", align = "left", inputMode }) => (
+  <div className="flex items-center w-full border border-gray-200 rounded-lg bg-white focus-within:border-[#cb563e] transition-all overflow-hidden">
+    {prefix && <span className="pl-2 text-xs font-bold text-gray-600 shrink-0">{prefix}</span>}
+    <input type="text" inputMode={inputMode} value={value} onChange={onChange} placeholder={placeholder}
+      className={`flex-1 p-2 outline-none bg-transparent text-sm font-bold text-[#182349] min-w-0 text-${align}`} />
+    {suffix && <span className="px-2 text-xs font-bold text-gray-500 shrink-0 border-l border-gray-200 bg-gray-50">{suffix}</span>}
+  </div>
+);
+
+const RangeSlider = ({ value, onChange, label, isAlpha = false }) => (
+  <div className="mb-4 md:mb-2 md:flex md:items-center md:gap-4">
+    <div className={`font-bold text-sm mb-2 md:mb-0 md:w-28 shrink-0 ${isAlpha ? 'text-red-500' : 'text-[#182349]'}`}>
+      {label}
+    </div>
+    <div className="flex items-center gap-3 flex-1">
+      <span className="text-[10px] text-gray-500 font-bold shrink-0">弱</span>
+      <input
+        type="range"
+        min="0"
+        max="10"
+        value={value}
+        onChange={onChange}
+        className="flex-1 accent-[#182349] h-1 bg-gray-300 rounded-lg appearance-none cursor-pointer min-w-0"
+      />
+      <span className="text-[10px] text-gray-500 font-bold shrink-0">強</span>
+    </div>
+  </div>
+);
+
+const SaltSelector = ({ value, onChange }) => (
+  <div className="flex gap-1 flex-wrap shrink-0">
+    {SALT_LEVELS.map(level => (
+      <button
+        key={level}
+        type="button"
+        onClick={() => onChange(value === level ? '' : level)}
+        className="px-2 py-1 text-xs font-bold rounded border transition-all shrink-0"
+        style={{
+          backgroundColor: value === level ? N : '#fff',
+          color: value === level ? '#fff' : N,
+          borderColor: N,
+          minWidth: 28,
+        }}
+      >
+        {level}
+      </button>
+    ))}
+  </div>
+);
+
+const PartRow = ({ namePlaceholder = "パーツ名", nameValue, onNameChange, saltValue, onSaltChange }) => (
+  <div className="flex items-center gap-2 mb-2">
+    <div className="flex-1 min-w-0">
+      <Input value={nameValue} onChange={onNameChange} placeholder={namePlaceholder} />
+    </div>
+    <SaltSelector value={saltValue} onChange={onSaltChange} />
+  </div>
+);
+
+const YesNoToggle = ({ value, onChange }) => (
+  <div className="flex gap-2">
+    {['はい', 'いいえ'].map(opt => (
+      <button
+        key={opt}
+        type="button"
+        onClick={() => onChange(opt)}
+        className="px-4 py-2 text-sm font-bold rounded-lg border transition-all"
+        style={{
+          backgroundColor: value === opt ? (opt === 'はい' ? R : N) : '#fff',
+          color: value === opt ? '#fff' : N,
+          borderColor: value === opt ? (opt === 'はい' ? R : N) : '#d1d5db',
+        }}
+      >
+        {opt}
+      </button>
+    ))}
+  </div>
+);
+
+const BarChartInput = ({ label, value, onChange, activeColor = '#182349' }) => {
+  const handleToggle = (level) => onChange(value === level ? level - 1 : level);
+  return (
+    <div className="flex flex-col items-center w-full">
+      <div className="text-[11px] font-black mb-1.5" style={{ color: activeColor }}>
+        {label}
+      </div>
+      <div
+        className="relative flex flex-col-reverse w-full cursor-pointer bg-gray-100 rounded overflow-hidden"
+        style={{ gap: 0, maxWidth: 40, border: '1px solid #d1d5db' }}
+      >
+        {[1, 2, 3, 4, 5].map(level => (
+          <div
+            key={level}
+            onClick={() => handleToggle(level)}
+            className="w-full relative z-10"
+            style={{
+              height: 12,
+              transition: 'background-color 0.15s',
+              backgroundColor: value >= level ? activeColor : 'transparent',
+              borderTop: level < 5 ? (value > level ? '1px dashed rgba(255,255,255,0.5)' : '1px dashed #9ca3af') : 'none',
+            }}
+          />
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const TasteChart = ({ formData, handleChange }) => {
+  return (
+    <div className="relative shrink-0 w-[560px] h-[360px] bg-[#f2efe9] rounded-lg overflow-hidden font-sans border border-gray-300">
+      <div 
+        className="absolute left-0 w-full h-[86px] bg-[#d1d1d1] z-0" 
+        style={{ bottom: '107px', clipPath: 'polygon(15% 0, 85% 0, 100% 100%, 0 100%)' }}
+      ></div>
+
+      <svg viewBox="0 0 560 360" className="absolute inset-0 w-full h-full pointer-events-none z-30">
+        <defs>
+          <marker id="formArrowStart" markerWidth="8" markerHeight="8" refX="2" refY="4" orient="auto">
+            <path d="M 8 1 L 2 4 L 8 7 z" fill={N} />
+          </marker>
+          <marker id="formArrowEnd" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+            <path d="M 0 1 L 6 4 L 0 7 z" fill={N} />
+          </marker>
+        </defs>
+        <line x1="120" y1="70" x2="200" y2="105" stroke={N} strokeWidth="1.5" markerStart="url(#formArrowStart)" markerEnd="url(#formArrowEnd)" />
+        <line x1="120" y1="190" x2="200" y2="145" stroke={N} strokeWidth="1.5" markerStart="url(#formArrowStart)" markerEnd="url(#formArrowEnd)" />
+        <line x1="440" y1="70" x2="360" y2="105" stroke={N} strokeWidth="1.5" markerStart="url(#formArrowStart)" markerEnd="url(#formArrowEnd)" />
+        <line x1="440" y1="190" x2="360" y2="145" stroke={N} strokeWidth="1.5" markerStart="url(#formArrowStart)" markerEnd="url(#formArrowEnd)" />
+      </svg>
+
+      <div className="absolute top-[30px] left-[50px] w-[64px] bg-white/95 border-[1.5px] border-dashed border-gray-300 py-1.5 px-1 rounded-sm shadow-sm z-20">
+        <BarChartInput label="酸味" value={formData.sec4_4_sour} onChange={v => handleChange('sec4_4_sour', v)} activeColor="#6b7280" />
+      </div>
+      <div className="absolute bottom-[107px] left-[50px] w-[64px] bg-white/95 border-[1.5px] border-dashed border-gray-300 py-1.5 px-1 rounded-sm shadow-sm z-20">
+        <BarChartInput label="苦味" value={formData.sec4_4_bitter} onChange={v => handleChange('sec4_4_bitter', v)} activeColor="#6b7280" />
+      </div>
+      <div className="absolute top-[30px] right-[50px] w-[64px] bg-white/95 border-[1.5px] border-dashed border-gray-300 py-1.5 px-1 rounded-sm shadow-sm z-20">
+        <BarChartInput label="辛味" value={formData.sec4_4_spicy} onChange={v => handleChange('sec4_4_spicy', v)} activeColor="#6b7280" />
+      </div>
+      <div className="absolute bottom-[107px] right-[50px] w-[64px] bg-white/95 border-[1.5px] border-dashed border-gray-300 py-1.5 px-1 rounded-sm shadow-sm z-20">
+        <BarChartInput label="渋味" value={formData.sec4_4_astringent} onChange={v => handleChange('sec4_4_astringent', v)} activeColor="#6b7280" />
+      </div>
+
+      <div className="absolute top-[70px] left-[50%] translate-x-[-50%] bg-[#e6c1bc] p-2.5 rounded flex gap-6 shadow-sm z-20">
+        <div className="w-[64px] bg-white/95 border-[1.5px] border-dashed border-gray-300 py-1.5 px-1 rounded-sm">
+          <BarChartInput label="甘味" value={formData.sec4_4_sweet} onChange={v => handleChange('sec4_4_sweet', v)} activeColor={R} />
+        </div>
+        <div className="w-[64px] bg-white/95 border-[1.5px] border-dashed border-gray-300 py-1.5 px-1 rounded-sm">
+          <BarChartInput label="油脂" value={formData.sec4_4_fat} onChange={v => handleChange('sec4_4_fat', v)} activeColor={R} />
+        </div>
+      </div>
+
+      <div className="absolute bottom-[10px] left-[50%] translate-x-[-50%] bg-[#a3a8b7] p-2.5 rounded flex gap-6 shadow-md z-20">
+        <div className="w-[64px] bg-white/95 border-[1.5px] border-dashed border-gray-300 py-1.5 px-1 rounded-sm">
+          <BarChartInput label="うま味" value={formData.sec4_4_umami} onChange={v => handleChange('sec4_4_umami', v)} activeColor={N} />
+        </div>
+        <div className="w-[64px] bg-white/95 border-[1.5px] border-dashed border-gray-300 py-1.5 px-1 rounded-sm">
+          <BarChartInput label="塩味" value={formData.sec4_4_shio} onChange={v => handleChange('sec4_4_shio', v)} activeColor={N} />
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================
+// AI読み取り用シート（9ページ構成）
+// ============================================================
+const AIReadableSheet = ({ formData }) => {
+  const PageWrapper = ({ children, id }) => (
+    <div id={id} style={{
+      width: 1000, height: 1414, backgroundColor: '#fff', padding: '60px 80px',
+      boxSizing: 'border-box', fontFamily: 'sans-serif', color: '#1a1a1a',
+      display: 'flex', flexDirection: 'column', position: 'relative'
+    }}>
+      {children}
+      <div style={{ position: 'absolute', bottom: 40, right: 80, fontSize: 14, color: '#999' }}>EDICODE ゴール設計シート / AI読み取り用データ</div>
+    </div>
+  );
+
+  const SectionHeader = ({ title }) => (
+    <h2 style={{ fontSize: 32, fontWeight: 900, borderBottom: '4px solid #182349', paddingBottom: 10, marginBottom: 40, color: '#182349' }}>{title}</h2>
+  );
+
+  const QA = ({ q, a }) => (
+    <div style={{ marginBottom: 30 }}>
+      <div style={{ fontSize: 18, fontWeight: 700, color: '#666', marginBottom: 8 }}>質問：{q}</div>
+      <div style={{ fontSize: 22, fontWeight: 500, lineHeight: 1.6, whiteSpace: 'pre-wrap', backgroundColor: '#f9f9f9', padding: 20, borderRadius: 8, border: '1px solid #eee' }}>
+        {a || '未入力'}
+      </div>
+    </div>
+  );
+
+  const DesignBlock = ({ label, name, image }) => (
+    <div style={{ marginBottom: 15 }}>
+      <div style={{ fontWeight: 800, fontSize: 20 }}>{label}</div>
+      <div style={{ marginLeft: 15 }}>パーツ名：{name || '未入力'}</div>
+      <div style={{ marginLeft: 15 }}>イメージ：{image || '未入力'}</div>
+    </div>
+  );
+
+  return (
+    <div style={{ position: 'fixed', top: 0, left: -3000 }}>
+      <PageWrapper id="ai-page-1">
+        <SectionHeader title="1. 想定シチュエーションの定義" />
+        <QA q="誰に・いつ・どこで・何のために食べてもらうか？" a={formData.sec1_who} />
+        <QA q="食べ手は、この料理に何を期待してそうか？" a={formData.sec1_expectation} />
+        <QA q="気にすること、避けるべきNG要素・制約は？" a={formData.sec1_ng} />
+      </PageWrapper>
+      <PageWrapper id="ai-page-2">
+        <SectionHeader title="2. 料理レベルと価格イメージ/付加価値の設定" />
+        <div style={{ display: 'flex', gap: 20, marginBottom: 30 }}>
+          <div style={{ flex: 1 }}><QA q="目指す料理の完成度（偏差値）" a={formData.sec2_deviation} /></div>
+          <div style={{ flex: 1 }}><QA q="参考のお店" a={formData.sec2_ref_store} /></div>
+          <div style={{ flex: 1 }}><QA q="価格帯イメージ" a={formData.sec2_price_range} /></div>
+        </div>
+        <QA q="食べ手にどんな体験（付加価値）を提供できると満足してもらえそうか？" a={formData.sec2_experience} />
+      </PageWrapper>
+      <PageWrapper id="ai-page-3">
+        <SectionHeader title="3. ビジュアルイメージ" />
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 20 }}>
+          {formData.sec3_images?.map((img, i) => (
+            <img key={i} src={img} style={{ width: 150, height: 150, objectFit: 'cover', borderRadius: 8, border: '1px solid #ddd' }} />
+          ))}
+        </div>
+        <QA q="ビジュアル補足メモ" a={formData.sec3_free_image} />
+        <QA q="何が主役だと感じてほしいか？" a={formData.sec3_main_element} />
+        <QA q="どんな印象を持ってほしいか？" a={formData.sec3_impression} />
+        <QA q="どう食べ進めてもらいたいか？" a={formData.sec3_how_to_eat} />
+      </PageWrapper>
+      <PageWrapper id="ai-page-4">
+        <SectionHeader title="4-1. 理想の「らしさ」" />
+        <QA q="この料理の「らしさ（絶対条件）」は？" a={formData.sec4_1_rashisa} />
+        <QA q="主役のパーツ" a={formData.sec4_1_main_parts.map(p => p.name ? `${p.name} (塩味:${p.salt || '無'})` : '').filter(v => v).join(' / ')} />
+        <QA q="サポートパーツ" a={formData.sec4_1_support_parts.map(p => p.name ? `${p.name} (塩味:${p.salt || '無'})` : '').filter(v => v).join(' / ')} />
+      </PageWrapper>
+      <PageWrapper id="ai-page-5">
+        <SectionHeader title="4-2. 理想の「コク」" />
+        <QA q="料理全体のコクの強さ" a={KOKUMI_LEVELS[formData.sec4_2_kokumi_overall]} />
+        <div style={{ backgroundColor: '#f9f9f9', padding: 25, borderRadius: 10, border: '1px solid #eee' }}>
+          <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 15 }}>構成要素の強度（0〜10）</div>
+          <div style={{ fontSize: 22, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px 40px' }}>
+            <div>うま味：{formData.sec4_2_umami} / 10</div>
+            <div>塩味：{formData.sec4_2_shio} / 10</div>
+            <div>風味：{formData.sec4_2_fumi} / 10</div>
+            <div>甘味：{formData.sec4_2_ama} / 10</div>
+            <div>油脂：{formData.sec4_2_abura} / 10</div>
+          </div>
+        </div>
+        <QA q="コクのバランス確認" a={formData.sec4_2_balance} />
+      </PageWrapper>
+      <PageWrapper id="ai-page-6">
+        <SectionHeader title="4-3. 理想の「コントラスト」① 時系列変化" />
+        <div style={{ fontSize: 20, marginBottom: 20, fontWeight: 700 }}>Q.時間経過とともに、食感と風味はどう変化しますか？</div>
+        <div style={{ fontSize: 18 }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', border: '1px solid #ccc' }}>
+            <thead>
+              <tr style={{ backgroundColor: '#182349', color: '#fff' }}>
+                <th style={{ padding: 15, border: '1px solid #ccc' }}></th>
+                <th style={{ padding: 15, border: '1px solid #ccc' }}>口に入れる前後</th>
+                <th style={{ padding: 15, border: '1px solid #ccc' }}>咀嚼中</th>
+                <th style={{ padding: 15, border: '1px solid #ccc' }}>飲み込む時・余韻</th>
+              </tr>
+            </thead>
+            <tbody>
+              {['食感', '風味'].map(label => {
+                const prefix = label === '食感' ? 'sec4_3_tex' : 'sec4_3_fla';
+                return (
+                  <tr key={label}>
+                    <td style={{ padding: 15, border: '1px solid #ccc', fontWeight: 700, backgroundColor: '#eee' }}>{label}</td>
+                    <td style={{ padding: 15, border: '1px solid #ccc' }}>{formData[`${prefix}_before`] || '未入力'}</td>
+                    <td style={{ padding: 15, border: '1px solid #ccc' }}>{formData[`${prefix}_chew`] || '未入力'}</td>
+                    <td style={{ padding: 15, border: '1px solid #ccc' }}>{formData[`${prefix}_after`] || '未入力'}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </PageWrapper>
+      <PageWrapper id="ai-page-7">
+        <SectionHeader title="4-3. 理想の「コントラスト」② 役割設計" />
+        <div style={{ borderBottom: '2px solid #eee', paddingBottom: 20, marginBottom: 30 }}>
+          <h3 style={{ fontSize: 24, fontWeight: 900, color: R, marginBottom: 20 }}>■食感の設計</h3>
+          <DesignBlock label="①主役の食感" name={formData.sec4_3_tex_main_name} image={formData.sec4_3_tex_main_image} />
+          <DesignBlock label="②対比の食感" name={formData.sec4_3_tex_contrast_name} image={formData.sec4_3_tex_contrast_image} />
+          <DesignBlock label="③橋渡しの食感" name={formData.sec4_3_tex_bridge_name} image={formData.sec4_3_tex_bridge_image} />
+          <QA q="主役の食感を補完する必要はありそうですか？" a={formData.sec4_3_tex_supplement === 'はい' ? `はい：${formData.sec4_3_tex_supplement_text || '内容未入力'}` : 'いいえ'} />
+        </div>
+        <div>
+          <h3 style={{ fontSize: 24, fontWeight: 900, color: R, marginBottom: 20 }}>■風味の設計</h3>
+          <DesignBlock label="①主役の風味" name={formData.sec4_3_fla_main_name} image={formData.sec4_3_fla_main_image} />
+          <DesignBlock label="②対比の風味" name={formData.sec4_3_fla_contrast_name} image={formData.sec4_3_fla_contrast_image} />
+          <DesignBlock label="③橋渡しの風味" name={formData.sec4_3_fla_bridge_name} image={formData.sec4_3_fla_bridge_image} />
+          <QA q="主役の風味を補完する必要はありそうですか？" a={formData.sec4_3_fla_supplement === 'はい' ? `はい：${formData.sec4_3_fla_supplement_text || '内容未入力'}` : 'いいえ'} />
+        </div>
+      </PageWrapper>
+      <PageWrapper id="ai-page-8">
+        <SectionHeader title="4-4. 理想の「コントラスト」：味のバランス" />
+        <QA q="主役のパーツの味は単独でバランスをとるか？" a={formData.sec4_4_taste_main_balance} />
+        <QA q="対比となる味を持つパーツはあるか？" a={formData.sec4_4_taste_contrast_parts} />
+        <div style={{ backgroundColor: '#f9f9f9', padding: 25, borderRadius: 10, border: '1px solid #eee' }}>
+          <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 15 }}>味の構成強度の数値化（0〜5）</div>
+          <div style={{ fontSize: 22, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px 40px' }}>
+            <div style={{ color: R }}>甘味：{formData.sec4_4_sweet} / 5</div>
+            <div style={{ color: R }}>油脂：{formData.sec4_4_fat} / 5</div>
+            <div style={{ color: N }}>うま味：{formData.sec4_4_umami} / 5</div>
+            <div style={{ color: N }}>塩味：{formData.sec4_4_shio} / 5</div>
+            <div style={{ color: '#666' }}>酸味：{formData.sec4_4_sour} / 5</div>
+            <div style={{ color: '#666' }}>苦味：{formData.sec4_4_bitter} / 5</div>
+            <div style={{ color: '#666' }}>辛味：{formData.sec4_4_spicy} / 5</div>
+            <div style={{ color: '#666' }}>渋味：{formData.sec4_4_astringent} / 5</div>
+          </div>
+        </div>
+      </PageWrapper>
+      <PageWrapper id="ai-page-9">
+        <SectionHeader title="5. 設計したゴールの仮評価とレシピの条件" />
+        <QA q="狙った「偏差値・価格・コンセプト」に到達できそうか？" a={formData.sec5_evaluation} />
+        <QA q="この料理を一文で言うと？" a={formData.sec5_one_sentence} />
+        <QA q="食材のこだわりはあるか？" a={formData.sec5_ingredient} />
+        <QA q="調理法のこだわりはあるか？" a={formData.sec5_cooking} />
+      </PageWrapper>
+    </div>
+  );
+};
+
+// ============================================================
+// 出力シート（1枚PDF用）
+// ============================================================
+const ExportSheet = ({ formData }) => {
+  const ExBadge = ({ children }) => (
+    <span style={{ display: 'inline-block', backgroundColor: N, color: '#fff', fontSize: 8, fontWeight: 700,
+      padding: '2px 6px', borderRadius: 2, letterSpacing: '0.05em', verticalAlign: 'middle', whiteSpace: 'nowrap' }}>
+      {children}
+    </span>
+  );
+  const ExBox = ({ value, h, extra = {} }) => {
+    const text = String(value || '');
+    const lineCount = text.split('\n').length;
+    const charCount = text.length;
+    let fontSize = 9;
+    let lineHeight = 1.45;
+    if (lineCount >= 14 || charCount > 300) { fontSize = 6.5; lineHeight = 1.2; }
+    else if (lineCount >= 9 || charCount > 200) { fontSize = 7.5; lineHeight = 1.25; }
+    else if (lineCount >= 5 || charCount > 100) { fontSize = 8.5; lineHeight = 1.35; }
+    return (
+      <div style={{ backgroundColor: '#fff', border: '1px solid #d1d5db', padding: '4px 6px',
+        minHeight: h !== undefined ? h : 36, fontSize: fontSize, lineHeight: lineHeight, wordBreak: 'break-all',
+        overflowWrap: 'anywhere', color: N, whiteSpace: 'pre-wrap', overflow: 'hidden', ...extra }}>
+        {text}
+      </div>
+    );
+  };
+  const SectionTitle = ({ children }) => (
+    <div style={{ fontSize: 13, fontWeight: 900, color: N, borderBottom: `2px solid ${N}`, paddingBottom: 3, marginBottom: 6 }}>
+      {children}
+    </div>
+  );
+  const ContentBox = ({ children, extra = {} }) => (
+    <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', padding: 8, ...extra }}>
+      {children}
+    </div>
+  );
+  const SliderRow = ({ label, value, color }) => (
+    <div style={{ display: 'flex', alignItems: 'center', fontSize: 8.5, fontWeight: 700, gap: 4 }}>
+      <span style={{ width: 70, color, flexShrink: 0 }}>{label}</span>
+      <div style={{ flex: 1, position: 'relative', height: 12, display: 'flex', alignItems: 'center' }}>
+        <div style={{ position: 'absolute', width: '100%', height: 1, backgroundColor: '#9ca3af' }} />
+        {[0, 1, 2, 3, 4].map(n => (
+          <div key={n} style={{ position: 'absolute', left: `${n * 25}%`, width: 1, height: 8, backgroundColor: '#9ca3af' }} />
+        ))}
+        <div style={{ position: 'absolute', top: 2, width: 4, height: 8, backgroundColor: '#fff',
+          border: '1px solid #6b7280', zIndex: 2, left: `calc(${value * 10}% - 2px)` }} />
+      </div>
+    </div>
+  );
+  const TasteBar = ({ label, value, color }) => (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '5px 6px',
+      backgroundColor: 'rgba(255, 255, 255, 0.95)', border: '1px dashed #9ca3af', borderRadius: 4, width: 64, boxSizing: 'border-box' }}>
+      <span style={{ fontSize: 8, fontWeight: 900, color: color, marginBottom: 5 }}>{label}</span>
+      <div style={{ position: 'relative', display: 'flex', flexDirection: 'column-reverse', gap: 0, width: 32, backgroundColor: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: 2, overflow: 'hidden' }}>
+        {[1, 2, 3, 4, 5].map(l => (
+          <div key={l} style={{ width: '100%', height: 10, backgroundColor: value >= l ? color : 'transparent', borderTop: l < 5 ? (value > l ? '1px dashed rgba(255,255,255,0.4)' : '1px dashed #9ca3af') : 'none' }} />
+        ))}
+      </div>
+    </div>
+  );
+  const ExSaltSelector = ({ value }) => (
+    <div style={{ display: 'flex', gap: 2 }}>
+      {SALT_LEVELS.map(level => (
+        <div
+          key={level}
+          style={{
+            fontSize: 6.5,
+            fontWeight: 700,
+            padding: '2px 4px',
+            border: `1px solid ${N}`,
+            borderRadius: 2,
+            backgroundColor: value === level ? N : '#fff',
+            color: value === level ? '#fff' : N,
+            textAlign: 'center',
+            minWidth: 14
+          }}
+        >
+          {level}
+        </div>
+      ))}
+    </div>
+  );
+  const ExportTasteChart = ({ formData }) => {
+    return (
+      <div style={{ width: '100%', display: 'flex', justifyContent: 'center', height: 238 }}>
+        <div style={{ position: 'relative', width: 450, height: 280, backgroundColor: '#f2efe9', borderRadius: 8, overflow: 'hidden', border: '1px solid #e5e7eb', transform: 'scale(0.85)', transformOrigin: 'top center' }}>
+          <div style={{ position: 'absolute', bottom: 91, left: 0, width: '100%', height: 42, backgroundColor: '#d1d1d1', clipPath: 'polygon(15% 0, 85% 0, 100% 100%, 0 100%)', zIndex: 0 }}></div>
+          <svg viewBox="0 0 450 280" style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 30 }}>
+            <defs>
+              <marker id="exArrowStart" markerWidth="8" markerHeight="8" refX="2" refY="4" orient="auto">
+                <path d="M 8 1 L 2 4 L 8 7 z" fill={N} />
+              </marker>
+              <marker id="exArrowEnd" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+                <path d="M 0 1 L 6 4 L 0 7 z" fill={N} />
+              </marker>
+            </defs>
+            <line x1="85" y1="75" x2="165" y2="105" stroke={N} strokeWidth="1.5" markerStart="url(#exArrowStart)" markerEnd="url(#exArrowEnd)" />
+            <line x1="85" y1="165" x2="165" y2="135" stroke={N} strokeWidth="1.5" markerStart="url(#exArrowStart)" markerEnd="url(#exArrowEnd)" />
+            <line x1="365" y1="75" x2="285" y2="105" stroke={N} strokeWidth="1.5" markerStart="url(#exArrowStart)" markerEnd="url(#exArrowEnd)" />
+            <line x1="365" y1="165" x2="285" y2="135" stroke={N} strokeWidth="1.5" markerStart="url(#exArrowStart)" markerEnd="url(#exArrowEnd)" />
+          </svg>
+          <div style={{ position: 'absolute', top: 25, left: 20, zIndex: 20 }}>
+            <TasteBar label="酸味" value={formData.sec4_4_sour} color="#6b7280" />
+          </div>
+          <div style={{ position: 'absolute', bottom: 91, left: 20, zIndex: 20 }}>
+            <TasteBar label="苦味" value={formData.sec4_4_bitter} color="#6b7280" />
+          </div>
+          <div style={{ position: 'absolute', top: 25, right: 20, zIndex: 20 }}>
+            <TasteBar label="辛味" value={formData.sec4_4_spicy} color="#6b7280" />
+          </div>
+          <div style={{ position: 'absolute', bottom: 91, right: 20, zIndex: 20 }}>
+            <TasteBar label="渋味" value={formData.sec4_4_astringent} color="#6b7280" />
+          </div>
+          <div style={{ position: 'absolute', top: 40, left: '50%', transform: 'translateX(-50%)', backgroundColor: '#e6c1bc', padding: 6, borderRadius: 4, display: 'flex', gap: 12, zIndex: 20, boxShadow: '0 1px 2px rgba(0,0,0,0.05)' }}>
+            <TasteBar label="甘味" value={formData.sec4_4_sweet} color={R} />
+            <TasteBar label="油脂" value={formData.sec4_4_fat} color={R} />
+          </div>
+          <div style={{ position: 'absolute', bottom: 15, left: '50%', transform: 'translateX(-50%)', backgroundColor: '#a3a8b7', padding: 6, borderRadius: 4, display: 'flex', gap: 12, zIndex: 20, boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
+            <TasteBar label="うま味" value={formData.sec4_4_umami} color={N} />
+            <TasteBar label="塩味" value={formData.sec4_4_shio} color={N} />
+          </div>
+        </div>
+      </div>
+    );
+  };
+  return (
+    <div id="export-content-wrapper" style={{
+      width: 1000, minHeight: 1414, height: 'max-content', backgroundColor: '#fff', padding: '16px 24px',
+      boxSizing: 'border-box', fontFamily: EXPORT_FONT, color: N,
+      display: 'flex', flexDirection: 'column',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        backgroundColor: N, color: '#fff', padding: '8px 12px', height: 46, flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          <span style={{ fontSize: 16, fontWeight: 700, letterSpacing: '0.1em', borderRight: '2px solid #fff', paddingRight: 12, marginRight: 12 }}>EDICODE</span>
+          <span style={{ fontSize: 16, fontWeight: 700 }}>料理のゴール設計シート</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', backgroundColor: '#fff', color: N, padding: '4px 10px', width: 340, height: 30 }}>
+          <span style={{ fontSize: 10, fontWeight: 700, whiteSpace: 'nowrap' }}>料理名：</span>
+          <span style={{ flex: 1, fontSize: 12, fontWeight: 700, borderBottom: `1px solid ${N}`, overflow: 'hidden', paddingBottom: 1, marginLeft: 4 }}>{formData.dishName}</span>
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 10, marginTop: 6, flexShrink: 0, alignItems: 'stretch' }}>
+        <div style={{ flex: 4, display: 'flex', flexDirection: 'column' }}>
+          <SectionTitle>1.想定シチュエーションの定義</SectionTitle>
+          <ContentBox extra={{ display: 'flex', flexDirection: 'column', gap: 5, flex: 1 }}>
+            {[
+              { q: 'Q.誰に・いつ・どこで・何のために食べてもらうか？', val: formData.sec1_who },
+              { q: 'Q.食べ手は、この料理に何を期待してそうか？', val: formData.sec1_expectation },
+              { q: 'Q.制約やNG要素は？', val: formData.sec1_ng },
+            ].map(({ q, val }, i) => (
+              <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+                <div style={{ fontSize: 8, fontWeight: 700, color: N, marginBottom: 2 }}>{q}</div>
+                <ExBox value={val} extra={{ flex: 1, minHeight: 36 }} h={undefined} />
+              </div>
+            ))}
+          </ContentBox>
+        </div>
+        <div style={{ flex: 6, borderLeft: '1px solid #d1d5db', paddingLeft: 10, display: 'flex', flexDirection: 'column' }}>
+          <SectionTitle>2.料理レベルと価格イメージ/付加価値の設定</SectionTitle>
+          <div style={{ display: 'flex', gap: 8, flex: 1 }}>
+            <div style={{ width: '48%', backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', padding: 6, display: 'flex', flexDirection: 'column' }}>
+              <div style={{ fontSize: 7.5, fontWeight: 700, color: N, marginBottom: 4, borderBottom: '1px solid #e2e8f0', paddingBottom: 2 }}>完成度（偏差値）の目安</div>
+              <div style={{ display: 'grid', gridTemplateColumns: '22px auto max-content', gap: '1px 2px', fontSize: 6, lineHeight: 1.45 }}>
+                {[['80〜','最高峰/概念を覆す','（4.4）'],['75〜','業界トップ/想像超え','（4.1）'],['70〜','名店/期待以上の美味','（3.9）'],['65〜','優良店/期待する美味','（3.75）'],['60〜','良店/地元の美味しい店','（3.6）'],['55〜','美味しいチェーン店','（3.3）'],['50〜','美味しい家庭料理','（3.1）']].map(([score, desc, ref]) => (
+                  <React.Fragment key={score}><span style={{ fontWeight: 700, color: N }}>{score}</span><span style={{ color: '#374151' }}>{desc}</span><span style={{ color: '#9ca3af' }}>{ref}</span></React.Fragment>
+                ))}
+              </div>
+            </div>
+            <div style={{ width: '52%', display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <div style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
+                <div style={{ flex: '0 0 40px' }}><div style={{ fontSize: 7, color: '#6b7280', marginBottom: 1 }}>偏差値</div><div style={{ backgroundColor: '#fff', border: '1px solid #d1d5db', padding: '3px 5px', fontSize: 8, fontWeight: 700, minHeight: 20, color: N }}>{formData.sec2_deviation}</div></div>
+                <div style={{ flex: 3 }}><div style={{ fontSize: 7, color: '#6b7280', marginBottom: 1 }}>参考店</div><div style={{ backgroundColor: '#fff', border: '1px solid #d1d5db', padding: '3px 5px', fontSize: 8, fontWeight: 700, minHeight: 20, color: N }}>{formData.sec2_ref_store}</div></div>
+                <div style={{ flex: 2 }}><div style={{ fontSize: 7, color: '#6b7280', marginBottom: 1 }}>価格帯</div><div style={{ backgroundColor: '#fff', border: '1px solid #d1d5db', padding: '3px 5px', fontSize: 8, fontWeight: 700, minHeight: 20, color: N }}>{formData.sec2_price_range}</div></div>
+              </div>
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+                <div style={{ fontSize: 8, fontWeight: 700, color: N, marginBottom: 3 }}>Q.どんな付加価値/体験を提供するか？</div>
+                <ExBox value={formData.sec2_experience} extra={{ flex: 1, minHeight: 40 }} h={undefined} />
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
+        <SectionTitle>3.ビジュアルイメージ</SectionTitle>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+            <div style={{ display: 'flex', gap: 6, marginBottom: 6, height: 60, flexShrink: 0 }}>
+              {formData.sec3_images?.length > 0 ? formData.sec3_images.map((img, i) => (
+                <div key={i} style={{ width: 80, height: 60, border: '1px solid #d1d5db', borderRadius: 4, backgroundImage: `url(${img})`, backgroundSize: 'cover', backgroundPosition: 'center' }} />
+              )) : <div style={{ height: 60, display: 'flex', alignItems: 'center', fontSize: 8, color: '#9ca3af' }}>画像なし</div>}
+            </div>
+            <ExBox value={formData.sec3_free_image} extra={{ flex: 1, minHeight: 80 }} h={undefined} />
+          </div>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6, borderLeft: '1px solid #d1d5db', paddingLeft: 10, minWidth: 0 }}>
+            {[
+              { q: 'Q.見た瞬間に、何が主役だと感じてほしいか？', val: formData.sec3_main_element },
+              { q: 'Q.見た瞬間に、どんな印象を持ってほしいか？', val: formData.sec3_impression },
+              { q: 'Q.どう食べ進めてもらいたいか？', val: formData.sec3_how_to_eat },
+            ].map(({ q, val }, i) => (
+              <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+                <div style={{ fontSize: 7.5, fontWeight: 700, color: N, marginBottom: 1 }}>{q}</div>
+                <ExBox value={val} extra={{ flex: 1, minHeight: 30 }} h={undefined} />
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div style={{ borderTop: `2px solid ${N}`, marginTop: 6, paddingTop: 4, display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 4, flexShrink: 0 }}>
+        <span style={{ fontSize: 14, fontWeight: 900, color: N }}>4.料理全体 | 美味しさの３軸整理</span>
+      </div>
+      <div style={{ flexShrink: 0, display: 'flex', gap: 10 }}>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 }}>
+          <ContentBox extra={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 4, flexShrink: 0 }}>
+              <span style={{ fontSize: 10, fontWeight: 900, color: N }}>4-1. 理想の「らしさ」</span>
+              <ExBadge>期待値に応えるための絶対条件</ExBadge>
+            </div>
+            <div style={{ marginBottom: 4, flex: 1, display: 'flex', flexDirection: 'column' }}>
+              <div style={{ fontSize: 7.5, fontWeight: 700, marginBottom: 2 }}>Q.この料理の「らしさ（絶対条件）」は？</div>
+              <ExBox value={formData.sec4_1_rashisa} extra={{ flex: 1, minHeight: 60 }} h={undefined} />
+            </div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 7, fontWeight: 700, marginBottom: 2 }}>主役パーツ</div>
+                {formData.sec4_1_main_parts.map((part, i) => (
+                  <div key={i} style={{ display: 'flex', alignItems: 'stretch', gap: 4, marginBottom: 3 }}>
+                    <div style={{ flex: 1, backgroundColor: '#fff', border: '1px solid #d1d5db', padding: '2px 4px', fontSize: part.name?.length > 8 ? 6.5 : 8, minHeight: 18, lineHeight: 1.2, whiteSpace: 'normal', wordBreak: 'break-all', overflowWrap: 'anywhere', color: N }}>{part.name}</div>
+                    <ExSaltSelector value={part.salt} />
+                  </div>
+                ))}
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 7, fontWeight: 700, marginBottom: 2 }}>サポートパーツ</div>
+                {formData.sec4_1_support_parts.map((part, i) => (
+                  <div key={i} style={{ display: 'flex', alignItems: 'stretch', gap: 4, marginBottom: 3 }}>
+                    <div style={{ flex: 1, backgroundColor: '#fff', border: '1px solid #d1d5db', padding: '2px 4px', fontSize: part.name?.length > 8 ? 6.5 : 8, minHeight: 18, lineHeight: 1.2, whiteSpace: 'normal', wordBreak: 'break-all', overflowWrap: 'anywhere', color: N }}>{part.name}</div>
+                    <ExSaltSelector value={part.salt} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          </ContentBox>
+          <ContentBox>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 4 }}>
+              <span style={{ fontSize: 10, fontWeight: 900, color: N }}>4-2. 理想の「コク」</span>
+              <ExBadge>コクの強さイメージ</ExBadge>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', backgroundColor: '#fff', border: '1px solid #d1d5db', padding: '3px 6px', marginBottom: 4, fontSize: 7.5, fontWeight: 700 }}>
+              {KOKUMI_LEVELS.map((lbl, i) => (
+                <React.Fragment key={i}>
+                  <span style={{ color: N, fontWeight: formData.sec4_2_kokumi_overall === i ? 900 : 700, textDecoration: formData.sec4_2_kokumi_overall === i ? 'underline' : 'none' }}>{lbl}</span>
+                  {i < 4 && <span style={{ color: '#9ca3af' }}>/</span>}
+                </React.Fragment>
+              ))}
+            </div>
+            <div style={{ backgroundColor: '#fff', border: '1px solid #d1d5db', padding: '5px 8px', display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 4 }}>
+              {[{ l: 'うま味', v: formData.sec4_2_umami, c: N },{ l: '塩味', v: formData.sec4_2_shio, c: N },{ l: '風味', v: formData.sec4_2_fumi, c: N },{ l: '甘味', v: formData.sec4_2_ama, c: R },{ l: '油脂', v: formData.sec4_2_abura, c: R }].map((item, i) => <SliderRow key={i} label={item.l} value={item.v} color={item.c} />)}
+            </div>
+            <ExBox value={formData.sec4_2_balance} extra={{ minHeight: 24 }} h={undefined} />
+          </ContentBox>
+          <ContentBox extra={{ flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 4 }}>
+              <span style={{ fontSize: 10, fontWeight: 900, color: N }}>5. ゴールの仮評価とレシピ条件</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div style={{ fontSize: 7.5, fontWeight: 700, marginBottom: 1 }}>Q.目標に到達できそうか？</div>
+              <ExBox value={formData.sec5_evaluation} extra={{ flex: 1, minHeight: 30 }} h={undefined} />
+              <div style={{ fontSize: 7.5, fontWeight: 700, marginBottom: 1 }}>Q.一文で言うと？</div>
+              <ExBox value={formData.sec5_one_sentence} extra={{ flex: 1, minHeight: 30 }} h={undefined} />
+            </div>
+          </ContentBox>
+        </div>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6, borderLeft: '1px solid #d1d5db', paddingLeft: 10, minWidth: 0 }}>
+          <ContentBox>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 4 }}>
+              <span style={{ fontSize: 10, fontWeight: 900, color: N }}>4-3. 理想の「コントラスト」</span>
+              <ExBadge>食感と風味の変化</ExBadge>
+            </div>
+            <table style={{ width: '100%', borderCollapse: 'collapse', border: `1px solid ${N}`, marginBottom: 6, tableLayout: 'fixed' }}>
+              <thead>
+                <tr style={{ backgroundColor: N, color: '#fff' }}>
+                  <th style={{ border: '1px solid #fff', padding: '2px 4px', width: 32, fontSize: 7 }}></th>
+                  {['口前後', '咀嚼中', '飲み込む'].map(h => (<th key={h} style={{ border: '1px solid #fff', padding: '2px 4px', fontSize: 7, fontWeight: 700 }}>{h}</th>))}
+                </tr>
+              </thead>
+              <tbody>
+                {['食感', '風味'].map(label => {
+                  const prefix = label === '食感' ? 'sec4_3_tex' : 'sec4_3_fla';
+                  return (
+                    <tr key={label}>
+                      <td style={{ backgroundColor: '#9ca3af', color: '#fff', fontWeight: 700, textAlign: 'center', border: '1px solid #9ca3af', fontSize: 7 }}>{label}</td>
+                      <td style={{ border: '1px solid #d1d5db', padding: '2px 3px', verticalAlign: 'top', fontSize: 7.5, color: N, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{formData[`${prefix}_before`]}</td>
+                      <td style={{ border: '1px solid #d1d5db', padding: '2px 3px', verticalAlign: 'top', fontSize: 7.5, color: N, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{formData[`${prefix}_chew`]}</td>
+                      <td style={{ border: '1px solid #d1d5db', padding: '2px 3px', verticalAlign: 'top', fontSize: 7.5, color: N, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{formData[`${prefix}_after`]}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 3, marginBottom: 4 }}>
+              {[
+                { label: '①主役', type: 'main', n: 'sec4_3_tex_main_name', i: 'sec4_3_tex_main_image' },
+                { type: 'arrow', text: '◀︎' },
+                { label: '③橋渡し', type: 'bridge', n: 'sec4_3_tex_bridge_name', i: 'sec4_3_tex_bridge_image' },
+                { type: 'arrow', text: '▶︎' },
+                { label: '②対比', type: 'contrast', n: 'sec4_3_tex_contrast_name', i: 'sec4_3_tex_contrast_image' },
+              ].map((item, idx) => {
+                if (item.type === 'arrow') return <div key={idx} style={{ fontSize: 10, color: N, fontWeight: 900 }}>{item.text}</div>;
+                return (
+                  <div key={idx} style={{ flex: 1, padding: 3, borderRadius: 4, border: '1px solid #ddd', backgroundColor: item.type === 'main' ? 'rgba(203, 86, 62, 0.1)' : item.type === 'contrast' ? 'rgba(24, 35, 73, 0.1)' : 'rgba(0,0,0,0.05)' }}>
+                    <div style={{ fontSize: 6, fontWeight: 900, marginBottom: 1 }}>{item.label}</div>
+                    <ExBox value={formData[item.n]} h={14} extra={{ fontSize: 7, backgroundColor: 'rgba(255,255,255,0.7)', minHeight: 14 }} />
+                    <ExBox value={formData[item.i]} h={14} extra={{ fontSize: 7, backgroundColor: 'rgba(255,255,255,0.7)', minHeight: 14, marginTop: 1 }} />
+                  </div>
+                );
+              })}
+            </div>
+          </ContentBox>
+          <ContentBox extra={{ flex: 1, marginTop: '10px', display: 'flex', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 4 }}>
+              <span style={{ fontSize: 10, fontWeight: 900, color: N }}>4-4. 理想の「味のバランス」</span>
+            </div>
+            <div style={{ display: 'flex', gap: 6, marginBottom: 4 }}>
+              <div style={{ flex: 1 }}><ExBox value={formData.sec4_4_taste_main_balance} extra={{ minHeight: 24 }} h={undefined} /></div>
+              <div style={{ flex: 1 }}><ExBox value={formData.sec4_4_taste_contrast_parts} extra={{ minHeight: 24 }} h={undefined} /></div>
+            </div>
+            <ExportTasteChart formData={formData} />
+          </ContentBox>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================
+// メインアプリケーション
+// ============================================================
+const App = () => {
+  const [showPreview, setShowPreview] = useState(false);
+  const [isLibraryLoaded, setIsLibraryLoaded] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [isFormStarted, setIsFormStarted] = useState(false);
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitDone, setSubmitDone] = useState(false);
+  const [submitError, setSubmitError] = useState('');
+  const [user, setUser] = useState(null);
+  const [isSavingDraft, setIsSavingDraft] = useState(false);
+  const [showDraftModal, setShowDraftModal] = useState(false);
+  const [showSaveWarningModal, setShowSaveWarningModal] = useState(false);
+  const [draftData, setDraftData] = useState(null);
+  const [toastMessage, setToastMessage] = useState('');
+  const [mobilePdfFiles, setMobilePdfFiles] = useState([]); // 変更
+
+  const [formData, setFormData] = useState({
+    userName: '', dishName: '',
+    sec1_who: '', sec1_expectation: '', sec1_ng: '',
+    sec2_deviation: '', sec2_ref_store: '', sec2_price_range: '', sec2_experience: '',
+    sec3_free_image: '', sec3_images: [], sec3_main_element: '', sec3_impression: '', sec3_how_to_eat: '',
+    sec4_1_rashisa: '',
+    sec4_1_main_parts: [{name:'',salt:''},{name:'',salt:''},{name:'',salt:''}],
+    sec4_1_support_parts: [{name:'',salt:''},{name:'',salt:''},{name:'',salt:''}],
+    sec4_2_kokumi_overall: 2,
+    sec4_2_umami: 0, sec4_2_shio: 0, sec4_2_fumi: 0, sec4_2_ama: 0, sec4_2_abura: 0,
+    sec4_2_balance: '',
+    sec4_3_tex_before: '', sec4_3_tex_chew: '', sec4_3_tex_after: '',
+    sec4_3_fla_before: '', sec4_3_fla_chew: '', sec4_3_fla_after: '',
+    sec4_3_tex_main_name: '', sec4_3_tex_main_image: '',
+    sec4_3_tex_bridge_name: '', sec4_3_tex_bridge_image: '',
+    sec4_3_tex_contrast_name: '', sec4_3_tex_contrast_image: '',
+    sec4_3_tex_supplement: 'いいえ', sec4_3_tex_supplement_text: '',
+    sec4_3_fla_main_name: '', sec4_3_fla_main_image: '',
+    sec4_3_fla_bridge_name: '', sec4_3_fla_bridge_image: '',
+    sec4_3_fla_contrast_name: '', sec4_3_fla_contrast_image: '',
+    sec4_3_fla_supplement: 'いいえ', sec4_3_fla_supplement_text: '',
+    sec4_4_taste_main_balance: '',
+    sec4_4_taste_contrast_parts: '',
+    sec4_4_sour: 0, sec4_4_spicy: 0, sec4_4_sweet: 0, sec4_4_fat: 0,
+    sec4_4_bitter: 0, sec4_4_astringent: 0, sec4_4_umami: 0, sec4_4_shio: 0,
+    sec5_evaluation: '', sec5_one_sentence: '', sec5_ingredient: '', sec5_cooking: '',
+  });
+
+  // --- Auth & Draft ---
+  useEffect(() => {
+    fetch('https://fonts.googleapis.com/css2?family=Zen+Maru+Gothic:wght@400;500;700;900&display=swap')
+      .then(res => res.text())
+      .then(css => {
+        const style = document.createElement('style');
+        style.id = 'zen-maru-font';
+        style.textContent = css;
+        document.head.appendChild(style);
+      });
+
+    if (!auth) return;
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else { await signInAnonymously(auth); }
+      } catch (e) { console.error('Auth error', e); }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user || !db) return;
+    const checkDraft = async () => {
+      try {
+        const draftRef = doc(db, 'artifacts', appId, 'users', user.uid, 'drafts', 'currentDraft');
+        const draftSnap = await getDoc(draftRef);
+        if (draftSnap.exists()) {
+          const data = draftSnap.data();
+          if (data && data.formData) { setDraftData(data.formData); setShowDraftModal(true); }
+        }
+      } catch (e) { console.error('Failed to load draft', e); }
+    };
+    checkDraft();
+  }, [user]);
+
+  const handleSaveDraftClick = () => setShowSaveWarningModal(true);
+  const confirmSaveDraft = async () => {
+    setShowSaveWarningModal(false);
+    if (!user || !db) return;
+    setIsSavingDraft(true);
+    try {
+      const draftRef = doc(db, 'artifacts', appId, 'users', user.uid, 'drafts', 'currentDraft');
+      await setDoc(draftRef, { formData, updatedAt: new Date().toISOString() });
+      setToastMessage('一時保存しました！');
+      setTimeout(() => setToastMessage(''), 3000);
+    } catch (e) { setToastMessage('保存失敗'); } finally { setIsSavingDraft(false); }
+  };
+  const handleRestoreDraft = () => { if (draftData) { setFormData(draftData); setIsFormStarted(true); } setShowDraftModal(false); };
+  const handleChange = (field, value) => setFormData(prev => ({ ...prev, [field]: value }));
+  const handlePartChange = (field, index, subfield, value) => {
+    setFormData(prev => {
+      const arr = prev[field].map((item, i) => i === index ? { ...item, [subfield]: value } : item);
+      return { ...prev, [field]: arr };
+    });
+  };
+
+  const handleImageUpload = (e) => {
+    const files = Array.from(e.target.files);
+    if (!files.length) return;
+    files.slice(0, 5 - formData.sec3_images.length).forEach(file => {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          let w = img.width, h = img.height;
+          if (w > h) { if (w > 600) { h *= 600 / w; w = 600; } }
+          else { if (h > 600) { w *= 600 / h; h = 600; } }
+          canvas.width = w; canvas.height = h;
+          canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
+          setFormData(prev => ({ ...prev, sec3_images: [...(prev.sec3_images || []), dataUrl].slice(0, 5) }));
+        };
+        img.src = event.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+    e.target.value = '';
+  };
+  const removeImage = (index) => handleChange('sec3_images', formData.sec3_images.filter((_, i) => i !== index));
+
+  const generateVisualPdf = async () => {
+    const element = document.getElementById('export-content-wrapper');
+    if (!element) return null;
+    await document.fonts.ready;
+    const exportHeight = Math.max(1414, element.scrollHeight);
+    const pngData = await window.htmlToImage.toPng(element, { pixelRatio: 2, backgroundColor: '#ffffff', cacheBust: true });
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF({ orientation: 'p', unit: 'px', format: [1000, exportHeight] });
+    pdf.addImage(pngData, 'PNG', 0, 0, 1000, exportHeight);
+    return pdf;
+  };
+
+  const generateAiReadablePdf = async () => {
+    await document.fonts.ready;
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF({ orientation: 'p', unit: 'px', format: [1000, 1414] });
+    for (let i = 1; i <= 9; i++) {
+      const element = document.getElementById(`ai-page-${i}`);
+      if (element) {
+        const pngData = await window.htmlToImage.toPng(element, { pixelRatio: 1.5, backgroundColor: '#ffffff', width: 1000, height: 1414, cacheBust: true });
+        if (i > 1) pdf.addPage([1000, 1414], 'p');
+        pdf.addImage(pngData, 'PNG', 0, 0, 1000, 1414);
+      }
+    }
+    return pdf;
+  };
+
+  const handleMobilePdfSave = async (file) => {
+    const pdfFile = new File([file.blob], file.filename, { type: 'application/pdf' });
+
+    if (navigator.canShare && navigator.canShare({ files: [pdfFile] })) {
+      try {
+        await navigator.share({
+          files: [pdfFile],
+          title: file.filename,
+        });
+        return;
+      } catch (e) {
+        if (e && e.name === 'AbortError') return;
+        console.warn('share canceled or failed', e);
+      }
+    }
+
+    // Share APIが使えない、または失敗した場合のフォールバック
+    const blobUrl = URL.createObjectURL(file.blob);
+    const link = document.createElement('a');
+    link.href = blobUrl;
+    link.download = file.filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+  };
+
+  const handleLocalSaveClick = async (type) => {
+    if (!isLibraryLoaded) return;
+    setMobilePdfFiles([]); // 変更
+    setIsGenerating(true);
+    window.scrollTo(0, 0);
+    await new Promise(r => setTimeout(r, 800));
+    try {
+      const safeUserName = sanitizeFileName(formData.userName || '無名');
+      const safeDishName = sanitizeFileName(formData.dishName || '無題');
+      const base = `【${safeUserName}】${safeDishName}`;
+
+      const onReady = (file) => {
+        setMobilePdfFiles(prev => [...prev, file]); // 変更
+      };
+
+      if (type === 'visual' || type === 'both') {
+        const pdf = await generateVisualPdf();
+        if (pdf) await savePdfWithPicker(pdf, `${base}_3-2料理のゴール設計ワーク.pdf`, onReady);
+      }
+      if (type === 'ai' || type === 'both') {
+        const pdf = await generateAiReadablePdf();
+        if (pdf) await savePdfWithPicker(pdf, `${base}_料理のゴール設計シート_AI読み取り用.pdf`, onReady);
+      }
+    } catch (e) { alert('保存失敗'); } finally { setIsGenerating(false); }
+  };
+
+  const handleSubmitToInstructor = async () => {
+    if (!isLibraryLoaded) return;
+    setIsSubmitting(true); setSubmitError('');
+    window.scrollTo(0, 0);
+    await new Promise(r => setTimeout(r, 1000));
+    try {
+      const visualPdf = await generateVisualPdf();
+      const aiPdf = await generateAiReadablePdf();
+      if (!visualPdf || !aiPdf) throw new Error('PDF失敗');
+
+      const safeUserName = sanitizeFileName(formData.userName || '無名');
+      const safeDishName = sanitizeFileName(formData.dishName || '無題');
+      const base = `【${safeUserName}】${safeDishName}`;
+
+      const response = await fetch(MAKE_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userName: formData.userName, dishName: formData.dishName,
+          submittedAt: new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }),
+          pdfBase64: visualPdf.output('datauristring').split(',')[1],
+          aiReadablePdfBase64: aiPdf.output('datauristring').split(',')[1],
+          fileName: `${base}_3-2料理のゴール設計ワーク.pdf`,
+          aiReadableFileName: `${base}_料理のゴール設計シート_AI読み取り用.pdf`,
+        }),
+      });
+      if (!response.ok) throw new Error('送信エラー');
+      setSubmitDone(true); setShowConfirmModal(false);
+    } catch (e) { setSubmitError('送信失敗'); } finally { setIsSubmitting(false); }
+  };
+
+  useEffect(() => {
+    const s1 = document.createElement('script'); s1.src = 'https://unpkg.com/html-to-image@1.11.11/dist/html-to-image.js';
+    const s2 = document.createElement('script'); s2.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+    document.body.appendChild(s1); document.body.appendChild(s2);
+    s2.onload = () => setIsLibraryLoaded(true);
+    return () => { document.body.removeChild(s1); document.body.removeChild(s2); };
+  }, []);
+
+  if (showPreview && submitDone) {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-4 bg-green-50 font-sans">
+        <div className="w-full max-w-md bg-white rounded-2xl shadow-xl text-center p-10">
+          <div className="w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-6 bg-green-100"><CheckCircle className="w-10 h-10 text-green-600" /></div>
+          <h2 className="text-2xl font-black text-[#182349] mb-6">提出が完了しました！</h2>
+          <button onClick={() => { setShowPreview(false); setIsFormStarted(false); setSubmitDone(false); }} className="w-full py-4 rounded-xl font-black text-white bg-[#182349]">フォームに戻る</button>
+        </div>
+      </div>
+    );
+  }
+
+  if (showPreview) {
+    const busy = isGenerating || isSubmitting;
+    return (
+      <div className="min-h-screen bg-gray-200 font-sans">
+        {busy && (
+          <div className="fixed inset-0 bg-white/95 z-50 flex flex-col items-center justify-center text-center p-4">
+            <RefreshCw className="w-16 h-16 text-[#cb563e] animate-spin mb-4" />
+            <h2 className="text-xl font-black">処理中...</h2>
+          </div>
+        )}
+        <div className="sticky top-0 z-40 bg-[#182349] p-4 flex flex-col md:flex-row justify-between items-center text-white shadow-lg gap-4">
+          <button onClick={() => setShowPreview(false)} className="px-4 py-2 border border-white/40 rounded-lg font-bold">← 入力に戻る</button>
+          <div className="flex flex-wrap justify-center gap-3 text-xs">
+            <button onClick={() => handleLocalSaveClick('visual')} disabled={busy} className="px-3 py-2 bg-white/10 rounded-lg font-bold hover:bg-white/20 transition-all">通常PDF保存</button>
+            <button onClick={() => handleLocalSaveClick('ai')} disabled={busy} className="px-3 py-2 bg-white/10 rounded-lg font-bold hover:bg-white/20 transition-all">AI用PDF保存</button>
+            <button onClick={() => handleLocalSaveClick('both')} disabled={busy} className="px-4 py-2 bg-white/20 border border-white/30 rounded-lg font-bold transition-all"><Download size={16}/>一括保存</button>
+            <button onClick={() => setShowConfirmModal(true)} disabled={busy} className="px-6 py-2 bg-[#cb563e] rounded-lg font-black flex items-center gap-2 shadow-lg hover:scale-105 transition-all"><Send size={18}/>提出</button>
+          </div>
+        </div>
+
+        {/* スマホ用PDFリンク表示 */}
+        {mobilePdfFiles.length > 0 && (
+          <div className="fixed bottom-4 left-4 right-4 z-[80] bg-white rounded-2xl shadow-2xl border border-gray-200 p-4">
+            <div className="font-black text-[#182349] mb-2">PDFが作成されました</div>
+            <p className="text-xs font-bold text-gray-600 mb-3">
+              下のボタンを押して、共有メニューから「ファイルに保存」または保存先を選択してください。
+            </p>
+            <div className="flex flex-col gap-2">
+              {mobilePdfFiles.map((file, index) => (
+                <button
+                  key={index}
+                  onClick={() => handleMobilePdfSave(file)}
+                  className="w-full py-3 rounded-xl bg-[#182349] text-white text-center font-black text-sm"
+                >
+                  {file.filename.includes('AI') ? 'AI読み取り用PDFを保存する' : '通常PDFを保存する'}
+                </button>
+              ))}
+              <button 
+                onClick={() => setMobilePdfFiles([])} 
+                className="w-full py-2 text-xs font-bold text-gray-400 mt-1"
+              >
+                閉じる
+              </button>
+            </div>
+          </div>
+        )}
+
+        <AIReadableSheet formData={formData} />
+        <div className="p-10 flex justify-center overflow-x-auto"><div className="shadow-2xl bg-white"><ExportSheet formData={formData} /></div></div>
+        {showConfirmModal && (
+          <div className="fixed inset-0 bg-black/50 z-[70] flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl p-8 max-w-sm w-full shadow-2xl text-center">
+              <h3 className="text-lg font-black mb-4">提出の確認</h3>
+              <p className="text-sm font-bold text-gray-600 mb-6 leading-relaxed text-left">
+                2種類のPDF（通常版・AI読取版）を提出します。よろしいですか？
+              </p>
+              {submitError && <div className="text-red-500 text-xs mb-4 font-bold">{submitError}</div>}
+              <div className="flex flex-col gap-2">
+                <button onClick={handleSubmitToInstructor} className="w-full py-3.5 bg-[#cb563e] text-white rounded-xl font-black">提出する</button>
+                <button onClick={() => setShowConfirmModal(false)} className="w-full py-3 bg-gray-100 rounded-xl font-bold">キャンセル</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (!isFormStarted) {
+    const canStart = formData.userName.trim() !== '' && formData.dishName.trim() !== '';
+    return (
+      <div className="min-h-screen flex items-center justify-center p-4 bg-gray-100 font-sans">
+        {showDraftModal && (
+          <div className="fixed inset-0 bg-black/50 z-[70] flex items-center justify-center p-4 text-center">
+            <div className="bg-white rounded-xl p-8 max-sm w-full shadow-2xl">
+              <h3 className="text-lg font-black mb-4">保存データがあります</h3>
+              <p className="text-sm font-bold text-gray-600 mb-6">前回の続きから再開しますか？</p>
+              <div className="flex flex-col gap-3">
+                <button onClick={handleRestoreDraft} className="w-full py-3 bg-[#182349] text-white rounded-lg font-black">再開する</button>
+                <button onClick={() => setShowDraftModal(false)} className="w-full py-3 bg-gray-100 rounded-lg font-bold">新しく始める</button>
+              </div>
+            </div>
+          </div>
+        )}
+        <div className="w-full max-w-[500px] bg-white rounded-[32px] shadow-2xl overflow-hidden border border-gray-100 relative">
+          <div className="h-3 w-full bg-[#aa4d3d]"></div>
+          <div className="px-10 py-12 flex flex-col items-center">
+            <div className="w-20 h-20 rounded-full flex items-center justify-center mb-6 bg-[#f8f0ee]">
+               <Target size={40} className="text-[#aa4d3d]" />
+            </div>
+            <h1 className="text-[26px] font-black text-[#182349] text-center leading-tight mb-2">
+              料理のゴール設計シート<br />入力フォーム
+            </h1>
+            <p className="text-sm font-black text-[#182349] mb-8">3-2料理のゴール設計ワーク</p>
+            <div className="w-full bg-[#f8f9fa] rounded-2xl p-6 mb-8 border border-gray-100">
+              <div className="flex items-center gap-2 mb-3 text-[#182349]">
+                <BookOpen size={20} className="shrink-0" />
+                <span className="font-black text-[15px]">入力フォームの目的</span>
+              </div>
+              <p className="text-[14px] font-bold text-gray-600 leading-relaxed ml-7">
+                料理のゴールを設計し、<br />美味しさの3軸に沿って整理する
+              </p>
+            </div>
+            <p className="text-[12px] font-black text-[#aa4d3d] text-center mb-10 leading-relaxed">
+              ※ワークで得た質問は、本フォームではなくSlackでご質問下さい。
+            </p>
+            <div className="w-full space-y-6 mb-12">
+              <div className="space-y-2">
+                <label className="block text-[15px] font-black text-[#182349]">お名前</label>
+                <input type="text" value={formData.userName} onChange={e => handleChange('userName', e.target.value)} className="w-full p-4 border border-gray-200 rounded-xl outline-none font-bold text-gray-700 focus:border-[#aa4d3d] transition-colors" placeholder="例：料理 花子" />
+              </div>
+              <div className="space-y-2">
+                <label className="block text-[15px] font-black text-[#182349]">料理名</label>
+                <input type="text" value={formData.dishName} onChange={e => handleChange('dishName', e.target.value)} className="w-full p-4 border border-gray-200 rounded-xl outline-none font-bold text-gray-700 focus:border-[#aa4d3d] transition-colors" placeholder="例：からあげ定食" />
+              </div>
+            </div>
+            <button disabled={!canStart} onClick={() => setIsFormStarted(true)} className={`w-full py-5 rounded-2xl font-black text-[16px] transition-all shadow-md ${canStart ? 'bg-[#182349] text-white hover:bg-[#25325d] active:scale-[0.98]' : 'bg-[#d1d5db] text-white cursor-not-allowed'}`}>
+              {canStart ? 'フォームの入力を開始する' : '必須項目を入力してください'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen pb-24 md:pb-40 font-sans" style={{ backgroundColor: COLORS.background, color: COLORS.text }}>
+      {showSaveWarningModal && (
+        <div className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-4 text-center">
+          <div className="bg-white rounded-2xl p-8 max-w-[420px] w-full shadow-2xl">
+            <h3 className="text-lg font-black mb-4 text-[#182349]">一時保存の注意</h3>
+            <p className="text-sm text-gray-700 font-bold mb-6">現在のブラウザに保存されます。他端末へは引き継げません。</p>
+            <div className="flex flex-col gap-2">
+              <button onClick={confirmSaveDraft} className="w-full py-3.5 rounded-xl font-black text-white bg-[#182349] flex items-center justify-center gap-2 transition-all"><Save size={20}/>同意して保存する</button>
+              <button onClick={() => setShowSaveWarningModal(false)} className="w-full py-3 rounded-xl font-bold text-gray-600 bg-gray-100">キャンセル</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <header className="bg-white shadow-xl border-b border-gray-100 relative z-40 md:sticky md:top-0 backdrop-blur-md bg-white/90">
+        <div className="max-w-5xl mx-auto px-6 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <div className="p-2 bg-[#182349] rounded-xl shadow-lg shadow-indigo-200"><ChefHat className="text-white w-6 h-6" /></div>
+            <div>
+              <h1 className="text-xl font-black tracking-tighter text-[#182349]">料理のゴール設計シート</h1>
+              <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mt-0.5">Architectural Framework</p>
+            </div>
+          </div>
+          <div className="flex gap-2 w-full md:w-auto">
+            <input type="text" value={formData.userName} onChange={e => handleChange('userName', e.target.value)} className="flex-1 md:w-32 p-2 border-2 border-gray-100 rounded font-bold text-sm" placeholder="お名前" />
+            <input type="text" value={formData.dishName} onChange={e => handleChange('dishName', e.target.value)} className="flex-1 md:w-48 p-2 border-2 border-gray-100 rounded font-bold text-sm" placeholder="料理名" />
+          </div>
+        </div>
+      </header>
+
+      <main className="max-w-5xl mx-auto px-4 py-8">
+        <Card title="1. 想定シチュエーションの定義">
+          <div className="grid gap-6">
+            <div>
+              <Label>Q.誰に・いつ・どこで・何のために食べてもらうか？</Label>
+              <SubLabel>例：友人とディナーに自宅でワインパーティーでつくるメインの赤ワインに合わせる一品</SubLabel>
+              <TextArea value={formData.sec1_who} onChange={e => handleChange('sec1_who', e.target.value)} />
+            </div>
+            <div>
+              <Label>Q.食べ手は, この料理に何を期待してそうか？</Label>
+              <SubLabel>例：ほっとしたい / 驚きたい / 贅沢感がほしい / わかりやすい美味しさがほしい</SubLabel>
+              <TextArea value={formData.sec1_expectation} onChange={e => handleChange('sec1_expectation', e.target.value)} />
+            </div>
+            <div>
+              <Label>Q.気にすること, 避けるべきNG要素・制約は？</Label>
+              <SubLabel>例：ワインと合わせることが前提。食感度が高い人たちが集まる。NGは牡蠣と辛すぎるもの</SubLabel>
+              <TextArea value={formData.sec1_ng} onChange={e => handleChange('sec1_ng', e.target.value)} />
+            </div>
+          </div>
+        </Card>
+
+        <Card title="2. 料理レベルと価格イメージ/付加価値の設定">
+          <div className="flex flex-col md:flex-row gap-8">
+            <div className="w-full md:w-[55%] bg-gray-50 p-4 border border-gray-200 rounded-xl overflow-x-auto">
+              <div className="font-bold text-[#182349] mb-2 text-sm border-b border-gray-300 pb-1">目指す完成度（料理の偏差値）</div>
+              <div className="grid grid-cols-[28px_auto_max-content] gap-x-1 gap-y-1 text-[10px] text-gray-700 leading-relaxed mb-2 tracking-tighter min-w-max">
+                {[['80〜','最高峰 / 概念を覆す','（ミシュラン2~3 4.4）'],['75〜','業界トップ / 想像を超える','（ミシュラン1 4.1）'],['70〜','名店 / 期待以上の美味しさ','（セレクテッド 3.9）'],['65〜','優良店 / 期待する美味しさ','（ビブグルマン 3.75）'],['60〜','良店 / 地元の美味しい店','（3.6）'],['55〜','美味しいチェーン店','（3.3）'],['50〜','美味しい時短家庭料理','（3.1）']].map(([score, desc, ref]) => (
+                  <React.Fragment key={score}><span style={{ fontWeight: 700, color: N }}>{score}</span><span style={{ color: '#374151', whiteSpace: 'nowrap' }}>{desc}</span><span style={{ color: '#9ca3af' }}>{ref}</span></React.Fragment>
+                ))}
+              </div>
+            </div>
+            <div className="w-full md:w-[45%] space-y-4">
+              <div>
+                <Label>Q.目指す料理の完成度/参考のお店/価格帯イメージ</Label>
+                <div className="flex flex-wrap sm:flex-nowrap gap-2 sm:gap-4 mb-4">
+                  <div className="w-16 shrink-0"><SubLabel>偏差値</SubLabel><Input value={formData.sec2_deviation} onChange={e => handleChange('sec2_deviation', e.target.value)} placeholder="例: 65" inputMode="numeric" /></div>
+                  <div className="flex-1 min-w-[120px]"><SubLabel>参考店</SubLabel><Input value={formData.sec2_ref_store} onChange={e => handleChange('sec2_ref_store', e.target.value)} placeholder="店名" /></div>
+                  <div className="flex-1 min-w-[100px]"><SubLabel>価格帯</SubLabel><Input value={formData.sec2_price_range} onChange={e => handleChange('sec2_price_range', e.target.value)} placeholder="例: 3000円" /></div>
+                </div>
+              </div>
+              <div>
+                <Label>Q.食べ手にどんな体験（付加価値）を提供できると満足してもらえそうか？</Label>
+                <SubLabel>例：自分では作れないプロの味、珍しい食材の組み合わせ、驚きの食感など</SubLabel>
+                <TextArea value={formData.sec2_experience} onChange={e => handleChange('sec2_experience', e.target.value)} rows={4} />
+              </div>
+            </div>
+          </div>
+        </Card>
+
+        <Card title="3. ビジュアルイメージ">
+          <div className="grid md:grid-cols-2 gap-8">
+            <div>
+              <Label>参考画像 (最大5枚)</Label>
+              <SubLabel>最初にビジュアルイメージを固めていきましょう！</SubLabel>
+              <div className="flex flex-wrap gap-3 mb-4 p-4 bg-gray-50 rounded-2xl border-2 border-dashed border-gray-200">
+                {formData.sec3_images.map((img, i) => (
+                  <div key={i} className="relative w-20 h-20 rounded-lg overflow-hidden group shadow-md"><img src={img} className="w-full h-full object-cover" /><button onClick={() => removeImage(i)} className="absolute inset-0 bg-red-500/80 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"><X size={20}/></button></div>
+                ))}
+                {formData.sec3_images.length < 5 && <label className="w-20 h-20 border-2 border-dashed border-[#182349]/30 rounded-lg flex items-center justify-center cursor-pointer hover:bg-gray-100 transition-colors text-gray-400"><Upload size={24}/><input type="file" multiple className="hidden" onChange={handleImageUpload} /></label>}
+              </div>
+              <Label>補足メモ</Label>
+              <SubLabel>画像の補足説明があれば自由にメモを記入しましょう ※４以降に進んで、アイデアが思いついたら随時追記してください。</SubLabel>
+              <TextArea value={formData.sec3_free_image} onChange={e => handleChange('sec3_free_image', e.target.value)} rows={4} />
+            </div>
+            <div className="space-y-4">
+              <div>
+                <Label>Q.見た瞬間に, 何が主役だと感じてほしいか？</Label>
+                <SubLabel>例：魚 / ソース / 焼き色 / 瑞々しさ / 香草</SubLabel>
+                <TextArea value={formData.sec3_main_element} onChange={e => handleChange('sec3_main_element', e.target.value)} rows={2} />
+              </div>
+              <div>
+                <Label>Q.見た瞬間に, どんな印象を持ってほしいか？</Label>
+                <SubLabel>例：軽やか / 濃厚 / 上品 / 力強い / 温かい / 素朴</SubLabel>
+                <TextArea value={formData.sec3_impression} onChange={e => handleChange('sec3_impression', e.target.value)} rows={2} />
+              </div>
+              <div>
+                <Label>Q.どう食べ進めてもらいたいか？</Label>
+                <SubLabel>例：全部を一緒に / まず主役から / ソースを絡めて</SubLabel>
+                <TextArea value={formData.sec3_how_to_eat} onChange={e => handleChange('sec3_how_to_eat', e.target.value)} rows={2} />
+              </div>
+            </div>
+          </div>
+        </Card>
+
+        <div className="bg-[#182349] text-white p-6 rounded-t-2xl mt-12 flex items-baseline gap-3">
+          <Badge className="bg-white text-[#182349]">4</Badge>
+          <h2 className="text-2xl font-black tracking-widest">美味しさの３軸整理</h2>
+        </div>
+
+        <div className="border-4 border-t-0 border-[#182349] rounded-b-2xl p-4 md:p-6 bg-white space-y-12 overflow-hidden">
+          <div>
+            <div className="flex flex-wrap items-center gap-3 mb-4">
+              <h3 className="text-xl font-black text-[#182349]">4-1. 理想の「らしさ」</h3>
+              <Badge className="text-xs">期待値に応えるための絶対条件</Badge>
+            </div>
+            <div className="mb-6">
+              <Label>Q.食べ手の期待に応えるためのこの料理の「らしさ（絶対条件）」は？</Label>
+              <SubLabel>例：ハンバーグなら「肉汁が溢れる」「表面が香ばしく焼けている」など</SubLabel>
+              <TextArea value={formData.sec4_1_rashisa} onChange={e => handleChange('sec4_1_rashisa', e.target.value)} rows={4} />
+            </div>
+            <div className="grid md:grid-cols-2 gap-6">
+              <div>
+                <Label>Q.主役のパーツはなにか？（最大3個）</Label>
+                <SubLabel>料理の核となる材料や部位を記入してください</SubLabel>
+                {formData.sec4_1_main_parts.map((p, i) => (<PartRow key={i} nameValue={p.name} onNameChange={e => handlePartChange('sec4_1_main_parts', i, 'name', e.target.value)} saltValue={p.salt} onSaltChange={v => handlePartChange('sec4_1_main_parts', i, 'salt', v)} />))}
+              </div>
+              <div>
+                <Label>Q.主役を支えるパーツはなにか？（最大3個）</Label>
+                <SubLabel>ソース, 付け合わせ, 香辛料などを記入してください</SubLabel>
+                {formData.sec4_1_support_parts.map((p, i) => (<PartRow key={i} nameValue={p.name} onNameChange={e => handlePartChange('sec4_1_support_parts', i, 'name', e.target.value)} saltValue={p.salt} onSaltChange={v => handlePartChange('sec4_1_support_parts', i, 'salt', v)} />))}
+              </div>
+            </div>
+          </div>
+
+          <div className="pt-8 border-t border-gray-100">
+            <div className="flex flex-wrap items-center gap-3 mb-4">
+              <h3 className="text-xl font-black text-[#182349]">4-2. 理想の「コク」</h3>
+              <Badge className="text-xs">コクの強さイメージ</Badge>
+            </div>
+            <div className="mb-6">
+              <Label>Q.料理全体として, どれくらいコクが強いイメージか？</Label>
+              <div className="flex flex-wrap justify-center gap-2 p-3 bg-gray-50 rounded-xl mb-4 overflow-x-hidden">
+                {KOKUMI_LEVELS.map((l, i) => (
+                  <button key={i} onClick={() => handleChange('sec4_2_kokumi_overall', i)} className={`text-xs sm:text-sm font-black whitespace-nowrap px-2 py-1 transition ${formData.sec4_2_kokumi_overall === i ? 'text-[#cb563e] underline underline-offset-4 decoration-2' : 'text-gray-400'}`}>{l}</button>
+                ))}
+              </div>
+              <div className="p-4 md:p-6 bg-white border border-gray-200 rounded-xl space-y-4 shadow-sm">
+                <Label>Q.コクの構成要素の強度イメージ</Label>
+                <SubLabel>基本3要素と厚みを持たせる要素を設定</SubLabel>
+                <RangeSlider label="うま味（必須）" value={formData.sec4_2_umami} onChange={e => handleChange('sec4_2_umami', e.target.value)} />
+                <RangeSlider label="塩味（必須）" value={formData.sec4_2_shio} onChange={e => handleChange('sec4_2_shio', e.target.value)} />
+                <RangeSlider label="風味（必須）" value={formData.sec4_2_fumi} onChange={e => handleChange('sec4_2_fumi', e.target.value)} />
+                <RangeSlider label="甘味（＋α）" value={formData.sec4_2_ama} onChange={e => handleChange('sec4_2_ama', e.target.value)} isAlpha />
+                <RangeSlider label="油脂（＋α）" value={formData.sec4_2_abura} onChange={e => handleChange('sec4_2_abura', e.target.value)} isAlpha />
+              </div>
+            </div>
+            <div>
+              <Label>Q.コクのバランス確認</Label>
+              <SubLabel>コクは一皿で完結？飲み物等で補完？「食べ疲れ」や「物足りなさ」のリスクはないか？</SubLabel>
+              <TextArea value={formData.sec4_2_balance} onChange={e => handleChange('sec4_2_balance', e.target.value)} rows={3} />
+            </div>
+          </div>
+
+          <div className="pt-8 border-t border-gray-100">
+            <div className="flex flex-wrap items-center gap-3 mb-6">
+              <h3 className="text-xl font-black text-[#182349]">4-3. 理想の「コントラスト」</h3>
+              <Badge className="text-xs">食感と風味のコントラスト</Badge>
+            </div>
+            <div className="space-y-10">
+              <div className="hidden md:block">
+                <Label>Q.時間経過とともに、食感と風味はどう変化しますか？</Label>
+                <SubLabel>食べた瞬間から余韻まで、どんな変化を設計したいか記入しましょう</SubLabel>
+                <div className="overflow-x-auto border-2 border-[#182349] rounded-lg mt-2">
+                  <table className="w-full bg-white table-fixed min-w-[600px]">
+                    <thead>
+                      <tr className="bg-[#182349] text-white text-xs">
+                        <th className="w-20"></th>
+                        <th className="p-3 border-r border-white/20 text-center">入れる前後</th>
+                        <th className="p-3 border-r border-white/20 text-center">咀嚼中</th>
+                        <th className="p-3 text-center">余韻</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {['食感', '風味'].map(l => {
+                        const f = l === '食感' ? 'sec4_3_tex' : 'sec4_3_fla';
+                        return (
+                          <tr key={l} className="border-b border-gray-100">
+                            <td className="bg-gray-50 font-black text-center p-2 border-r border-gray-100">{l}</td>
+                            <td className="p-1 border-r border-gray-100"><TextArea value={formData[`${f}_before`]} onChange={e => handleChange(`${f}_before`, e.target.value)} rows={2} /></td>
+                            <td className="p-1 border-r border-gray-100"><TextArea value={formData[`${f}_chew`]} onChange={e => handleChange(`${f}_chew`, e.target.value)} rows={2} /></td>
+                            <td className="p-1"><TextArea value={formData[`${f}_after`]} onChange={e => handleChange(`${f}_after`, e.target.value)} rows={2} /></td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="block md:hidden space-y-8">
+                {['食感', '風味'].map(label => {
+                  const prefix = label === '食感' ? 'sec4_3_tex' : 'sec4_3_fla';
+                  return (
+                    <div key={label} className="bg-gray-50 rounded-xl p-4 border border-gray-200">
+                      <div className="font-black text-lg mb-4 text-[#182349] border-b pb-2">{label}の変化</div>
+                      <div className="space-y-4">
+                        <div><Label>口に入れる前後</Label><TextArea value={formData[`${prefix}_before`]} onChange={e => handleChange(`${prefix}_before`, e.target.value)} rows={2} /></div>
+                        <div><Label>咀嚼中</Label><TextArea value={formData[`${prefix}_chew`]} onChange={e => handleChange(`${prefix}_chew`, e.target.value)} rows={2} /></div>
+                        <div><Label>飲み込む時・余韻</Label><TextArea value={formData[`${prefix}_after`]} onChange={e => handleChange(`${prefix}_after`, e.target.value)} rows={2} /></div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="space-y-4">
+                <Label>Q.食感の「主役」・「対比」・「橋渡し」を整理しましょう</Label>
+                <div className="flex flex-col lg:flex-row items-stretch gap-2 lg:gap-4">
+                  {[
+                    { label: '①主役の食感', type: 'main', n: 'sec4_3_tex_main_name', i: 'sec4_3_tex_main_image' },
+                    { type: 'arrow', text: '◀︎' },
+                    { label: '③橋渡しの食感', type: 'bridge', n: 'sec4_3_tex_bridge_name', i: 'sec4_3_tex_bridge_image' },
+                    { type: 'arrow', text: '▶︎' },
+                    { label: '②対比の食感', type: 'contrast', n: 'sec4_3_tex_contrast_name', i: 'sec4_3_tex_contrast_image' },
+                  ].map((item, idx) => {
+                    if (item.type === 'arrow') return <div key={idx} className="flex items-center justify-center font-black text-2xl lg:rotate-0 rotate-90 text-[#182349]">{item.text}</div>;
+                    let bg = item.type === 'main' ? "bg-[#cb563e]/10 border-[#cb563e]/30" : item.type === 'contrast' ? "bg-[#182349]/10 border-[#182349]/30" : "bg-gray-50 border-gray-200";
+                    return (
+                      <div key={idx} className={`flex-1 rounded-xl p-3 border ${bg}`}>
+                        <div className="font-black text-sm mb-2">{item.label}</div>
+                        <SubLabel>パーツ名</SubLabel><Input value={formData[item.n]} onChange={e => handleChange(item.n, e.target.value)} />
+                        <div className="mt-2"><SubLabel>イメージ</SubLabel><Input value={formData[item.i]} onChange={e => handleChange(item.i, e.target.value)} /></div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="flex flex-wrap gap-4 items-center p-4 bg-gray-50 rounded-xl mt-2">
+                  <span className="text-sm font-black">主役の食感を補完する必要がありますか？</span>
+                  <YesNoToggle value={formData.sec4_3_tex_supplement} onChange={v => handleChange('sec4_3_tex_supplement', v)} />
+                  {formData.sec4_3_tex_supplement === 'はい' && <div className="flex-1 min-w-[200px]"><Input value={formData.sec4_3_tex_supplement_text} onChange={e => handleChange('sec4_3_tex_supplement_text', e.target.value)} placeholder="具体的に..." /></div>}
+                </div>
+              </div>
+
+              <div className="space-y-4 pt-4">
+                <Label>Q.風味の「主役」・「対比」・「橋渡し」を整理しましょう</Label>
+                <div className="flex flex-col lg:flex-row items-stretch gap-2 lg:gap-4">
+                  {[
+                    { label: '①主役の風味', type: 'main', n: 'sec4_3_fla_main_name', i: 'sec4_3_fla_main_image' },
+                    { type: 'arrow', text: '◀︎' },
+                    { label: '③橋渡しの風味', type: 'bridge', n: 'sec4_3_fla_bridge_name', i: 'sec4_3_fla_bridge_image' },
+                    { type: 'arrow', text: '▶︎' },
+                    { label: '②対比の風味', type: 'contrast', n: 'sec4_3_fla_contrast_name', i: 'sec4_3_fla_contrast_image' },
+                  ].map((item, idx) => {
+                    if (item.type === 'arrow') return <div key={idx} className="flex items-center justify-center font-black text-2xl lg:rotate-0 rotate-90 text-[#182349]">{item.text}</div>;
+                    let bg = item.type === 'main' ? "bg-[#cb563e]/10 border-[#cb563e]/30" : item.type === 'contrast' ? "bg-[#182349]/10 border-[#182349]/30" : "bg-gray-50 border-gray-200";
+                    return (
+                      <div key={idx} className={`flex-1 rounded-xl p-3 border ${bg}`}>
+                        <div className="font-black text-sm mb-2">{item.label}</div>
+                        <SubLabel>パーツ名</SubLabel><Input value={formData[item.n]} onChange={e => handleChange(item.n, e.target.value)} />
+                        <div className="mt-2"><SubLabel>イメージ</SubLabel><Input value={formData[item.i]} onChange={e => handleChange(item.i, e.target.value)} /></div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="flex flex-wrap gap-4 items-center p-4 bg-gray-50 rounded-xl mt-2">
+                  <span className="text-sm font-black">主役の風味を補完する必要がありますか？</span>
+                  <YesNoToggle value={formData.sec4_3_fla_supplement} onChange={v => handleChange('sec4_3_fla_supplement', v)} />
+                  {formData.sec4_3_fla_supplement === 'はい' && <div className="flex-1 min-w-[200px]"><Input value={formData.sec4_3_fla_supplement_text} onChange={e => handleChange('sec4_3_fla_supplement_text', e.target.value)} placeholder="具体的に..." /></div>}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* 4-4 */}
+          <div className="pt-8 border-t border-gray-100">
+            <div className="flex flex-wrap items-center gap-3 mb-6">
+              <h3 className="text-xl font-black text-[#182349]">4-4. 理想の「味のバランス」</h3>
+              <Badge className="text-xs">味のコントラスト</Badge>
+            </div>
+            <div className="grid md:grid-cols-2 gap-6 mb-6">
+              <div>
+                <Label>Q.主役のパーツの味は単独でバランスをとるか？</Label>
+                <SubLabel>例：肉自体にしっかり味を入れる / 肉は薄味にしてソースで完成させる</SubLabel>
+                <TextArea value={formData.sec4_4_taste_main_balance} onChange={e => handleChange('sec4_4_taste_main_balance', e.target.value)} rows={2} />
+              </div>
+              <div>
+                <Label>Q.対比となる味を持つパーツはあるか？</Label>
+                <SubLabel>例：脂っこさ（油脂）に対するレモン（酸味）など</SubLabel>
+                <TextArea value={formData.sec4_4_taste_contrast_parts} onChange={e => handleChange('sec4_4_taste_contrast_parts', e.target.value)} rows={2} />
+              </div>
+            </div>
+            <div>
+              <Label>Q.料理を構成する味はそれぞれどれくらいの強さか？バランスを可視化</Label>
+              <SubLabel>基本4要素（甘味・油脂・うま味・塩味）と外周の刺激・調整要素を設定</SubLabel>
+              <div className="w-full mt-4 bg-gray-50 border border-gray-200 rounded-xl p-2 sm:p-4 overflow-hidden flex justify-center h-[230px] md:h-auto">
+                <div className="origin-top scale-[0.58] md:scale-100">
+                  <TasteChart formData={formData} handleChange={handleChange} />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <Card title="5. 設計したゴールの仮評価とレシピの条件">
+          <div className="space-y-6">
+            <div>
+              <Label>Q.狙った「偏差値・価格・コンセプト」に到達できそうか？</Label>
+              <SubLabel>現状の設計で、最初に定義した目標を達成できそうか自己評価しましょう</SubLabel>
+              <TextArea value={formData.sec5_evaluation} onChange={e => handleChange('sec5_evaluation', e.target.value)} />
+            </div>
+            <div>
+              <Label>Q.この料理を一文で言うと？</Label>
+              <SubLabel>例：ワイン好きのための, 香ばしさと酸味が共存する大人のステーキ定食</SubLabel>
+              <TextArea value={formData.sec5_one_sentence} onChange={e => handleChange('sec5_one_sentence', e.target.value)} />
+            </div>
+            <div className="grid md:grid-cols-2 gap-6">
+              <div>
+                <Label>Q.食材のこだわりはあるか？</Label>
+                <SubLabel>絶対に避けたい食材の条件等もあればご記入ください</SubLabel>
+                <TextArea value={formData.sec5_ingredient} onChange={e => handleChange('sec5_ingredient', e.target.value)} />
+              </div>
+              <div>
+                <Label>Q.調理法のこだわりはあるか？</Label>
+                <SubLabel>調理器具の制約など, 避けたい条件があればご記入ください</SubLabel>
+                <TextArea value={formData.sec5_cooking} onChange={e => handleChange('sec5_cooking', e.target.value)} />
+              </div>
+            </div>
+          </div>
+        </Card>
+      </main>
+
+      <div className="fixed bottom-0 left-0 w-full px-3 py-2 md:p-6 bg-white/95 md:bg-white/90 backdrop-blur-xl border-t z-50 shadow-[0_-10px_30px_rgba(0,0,0,0.05)]">
+        <div className="max-w-5xl mx-auto flex justify-between items-center gap-2 md:gap-4">
+          <button 
+            onClick={handleSaveDraftClick} 
+            disabled={isSavingDraft} 
+            className="w-auto px-3 py-2 md:px-8 md:py-4 border-2 border-[#182349] rounded-xl font-black text-[#182349] flex items-center justify-center gap-1 md:gap-2 hover:bg-gray-50 transition-all active:scale-95 text-xs md:text-base"
+          >
+            <Save size={16} className="md:w-5 md:h-5"/>
+            <span>{isSavingDraft ? '中...' : '一時保存'}</span>
+          </button>
+          <button 
+            onClick={() => setShowPreview(true)} 
+            className="flex-1 py-2 md:py-4 bg-[#182349] text-white rounded-xl font-black text-sm md:text-xl shadow-xl flex items-center justify-center gap-2 md:gap-3 hover:bg-[#25325d] transition-all active:scale-95"
+          >
+            <ImageIcon size={18} className="md:w-6 md:h-6"/>
+            <span>PDFプレビュー</span>
+          </button>
+        </div>
+      </div>
+      {toastMessage && <div className="fixed top-24 left-1/2 -translate-x-1/2 z-[100] bg-green-500 text-white px-6 py-3 rounded-full font-black shadow-2xl animate-bounce">{toastMessage}</div>}
+    </div>
+  );
+};
+
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
