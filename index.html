@@ -15,31 +15,48 @@
   <div id="root"></div>
 
   <script type="text/babel">
+    const { useState } = React;
 
-const { useState } = React;
+    function App() {
+      const [name, setName] = useState("");
+      const [dish, setDish] = useState("");
 
-// ===== 超シンプル動作確認用 =====
-function App() {
-  const [text, setText] = useState("");
+      return (
+        <div className="max-w-xl mx-auto p-6 bg-white rounded-2xl shadow mt-10">
+          <h1 className="text-2xl font-bold mb-4">
+            料理のゴール設計シート 入力フォーム
+          </h1>
 
-  return (
-    <div className="p-10">
-      <h1 className="text-2xl font-bold mb-4">レシピフォーム</h1>
+          <div className="mb-4">
+            <label className="block mb-1 font-semibold">お名前</label>
+            <input
+              className="border p-2 w-full rounded"
+              placeholder="例：料理 花子"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+          </div>
 
-      <input
-        className="border p-2 w-full mb-4"
-        placeholder="ここに入力"
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-      />
+          <div className="mb-4">
+            <label className="block mb-1 font-semibold">料理名</label>
+            <input
+              className="border p-2 w-full rounded"
+              placeholder="例：からあげ定食"
+              value={dish}
+              onChange={(e) => setDish(e.target.value)}
+            />
+          </div>
 
-      <p className="text-lg">入力内容：{text}</p>
-    </div>
-  );
-}
+          <div className="mt-6 p-4 bg-gray-50 rounded">
+            <p>入力内容：</p>
+            <p>名前：{name}</p>
+            <p>料理：{dish}</p>
+          </div>
+        </div>
+      );
+    }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App />);
-
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
   </script>
 </body>
 </html>
